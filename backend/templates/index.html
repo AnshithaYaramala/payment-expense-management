@@ -1,0 +1,1096 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PayFlow - Payment & Expense Management System</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            50: '#f5f3ff',
+                            100: '#ede9fe',
+                            500: '#6366f1',
+                            600: '#4f46e5',
+                            700: '#4338ca',
+                            900: '#1e1b4b',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- React 18 & Babel for seamless zero-build running -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background-color: #f8fafc;
+        }
+        .card-gradient {
+            background: linear-gradient(135deg, #4338ca 0%, #6366f1 50%, #818cf8 100%);
+        }
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 5px;
+            height: 5px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body class="text-slate-800 antialiased">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        const API_BASE = window.location.origin;
+
+        function App() {
+            // Auth State
+            const [token, setToken] = useState(localStorage.getItem('token') || '');
+            const [user, setUser] = useState(null);
+            const [authView, setAuthView] = useState('login'); // 'login' or 'register'
+            const [authForm, setAuthForm] = useState({ name: '', email: 'athena@example.com', password: 'password123' });
+            const [authError, setAuthError] = useState('');
+
+            // App State
+            const [activeTab, setActiveTab] = useState('dashboard');
+            const [summary, setSummary] = useState(null);
+            const [transactions, setTransactions] = useState([]);
+            const [subscriptions, setSubscriptions] = useState([]);
+            const [recipients, setRecipients] = useState([]);
+            const [filterCategory, setFilterCategory] = useState('all');
+            const [searchQuery, setSearchQuery] = useState('');
+            const [loading, setLoading] = useState(false);
+            const [toast, setToast] = useState(null);
+
+            // Modals
+            const [showTransferModal, setShowTransferModal] = useState(false);
+            const [showTopUpModal, setShowTopUpModal] = useState(false);
+            const [showExpenseModal, setShowExpenseModal] = useState(false);
+
+            // Forms
+            const [transferData, setTransferData] = useState({ recipient: '', amount: '', note: '' });
+            const [topUpData, setTopUpData] = useState({ amount: '50', method: 'Credit Card' });
+            const [expenseData, setExpenseData] = useState({ title: '', amount: '', category: 'Food' });
+
+            const chartRef = useRef(null);
+            const chartInstance = useRef(null);
+
+            const showToast = (message, type = 'success') => {
+                setToast({ message, type });
+                setTimeout(() => setToast(null), 4000);
+            };
+
+            // Initial Login / Seed Authentication
+            useEffect(() => {
+                if (token) {
+                    fetchProfile();
+                } else {
+                    // Try auto login as Athena (demo user)
+                    handleLoginSubmit();
+                }
+            }, [token]);
+
+            const handleLoginSubmit = async (e) => {
+                if (e) e.preventDefault();
+                setAuthError('');
+                try {
+                    const res = await fetch(`${API_BASE}/api/auth/login`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email: authForm.email, password: authForm.password })
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || 'Login failed');
+                    localStorage.setItem('token', data.token);
+                    setToken(data.token);
+                    setUser(data.user);
+                    showToast(`Welcome back, ${data.user.name}!`);
+                } catch (err) {
+                    setAuthError(err.message);
+                }
+            };
+
+            const handleRegisterSubmit = async (e) => {
+                e.preventDefault();
+                setAuthError('');
+                try {
+                    const res = await fetch(`${API_BASE}/api/auth/register`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(authForm)
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || 'Registration failed');
+                    localStorage.setItem('token', data.token);
+                    setToken(data.token);
+                    setUser(data.user);
+                    showToast('Account created with $500 bonus!');
+                } catch (err) {
+                    setAuthError(err.message);
+                }
+            };
+
+            const fetchProfile = async () => {
+                try {
+                    const res = await fetch(`${API_BASE}/api/auth/me`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    if (res.status === 401) {
+                        handleLogout();
+                        return;
+                    }
+                    const data = await res.json();
+                    setUser(data.user);
+                    loadDashboardData();
+                } catch (err) {
+                    console.error(err);
+                }
+            };
+
+            const loadDashboardData = async () => {
+                setLoading(true);
+                try {
+                    const headers = { 'Authorization': `Bearer ${token}` };
+                    const [resSum, resTxn, resSub, resRec] = await Promise.all([
+                        fetch(`${API_BASE}/api/reports/dashboard`, { headers }),
+                        fetch(`${API_BASE}/api/transactions?limit=20`, { headers }),
+                        fetch(`${API_BASE}/api/subscriptions`, { headers }),
+                        fetch(`${API_BASE}/api/users/recipients`, { headers })
+                    ]);
+
+                    const sumData = await resSum.json();
+                    const txnData = await resTxn.json();
+                    const subData = await resSub.json();
+                    const recData = await resRec.json();
+
+                    setSummary(sumData);
+                    setTransactions(txnData.transactions || []);
+                    setSubscriptions(subData.subscriptions || []);
+                    setRecipients(recData.recipients || []);
+                } catch (err) {
+                    console.error(err);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const handleLogout = () => {
+                localStorage.removeItem('token');
+                setToken('');
+                setUser(null);
+            };
+
+            // Render Chart
+            useEffect(() => {
+                if (!summary || !chartRef.current) return;
+
+                if (chartInstance.current) {
+                    chartInstance.current.destroy();
+                }
+
+                const ctx = chartRef.current.getContext('2d');
+                const gradientIncome = ctx.createLinearGradient(0, 0, 0, 250);
+                gradientIncome.addColorStop(0, 'rgba(99, 102, 241, 0.35)');
+                gradientIncome.addColorStop(1, 'rgba(99, 102, 241, 0.0)');
+
+                const gradientExpense = ctx.createLinearGradient(0, 0, 0, 250);
+                gradientExpense.addColorStop(0, 'rgba(239, 68, 68, 0.25)');
+                gradientExpense.addColorStop(1, 'rgba(239, 68, 68, 0.0)');
+
+                chartInstance.current = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: summary.cashflow?.labels || [],
+                        datasets: [
+                            {
+                                label: 'Income',
+                                data: summary.cashflow?.income || [],
+                                borderColor: '#6366f1',
+                                backgroundColor: gradientIncome,
+                                fill: true,
+                                tension: 0.4,
+                                borderWidth: 2.5,
+                                pointBackgroundColor: '#4f46e5',
+                                pointRadius: 3
+                            },
+                            {
+                                label: 'Expenses',
+                                data: summary.cashflow?.expense || [],
+                                borderColor: '#ef4444',
+                                backgroundColor: gradientExpense,
+                                fill: true,
+                                tension: 0.4,
+                                borderWidth: 2.5,
+                                pointBackgroundColor: '#dc2626',
+                                pointRadius: 3
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                display: false
+                            },
+                            tooltip: {
+                                backgroundColor: '#1e1b4b',
+                                titleFont: { size: 12, family: 'Plus Jakarta Sans' },
+                                bodyFont: { size: 12, family: 'Plus Jakarta Sans' },
+                                padding: 10,
+                                cornerRadius: 8
+                            }
+                        },
+                        scales: {
+                            x: {
+                                grid: { display: false }
+                            },
+                            y: {
+                                grid: { color: '#f1f5f9' },
+                                ticks: {
+                                    callback: (val) => '$' + val
+                                }
+                            }
+                        }
+                    }
+                });
+            }, [summary, activeTab]);
+
+            // Handle Transfer Submit
+            const handleTransfer = async (e) => {
+                e.preventDefault();
+                try {
+                    const res = await fetch(`${API_BASE}/api/wallet/transfer`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`
+                        },
+                        body: JSON.stringify(transferData)
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || 'Transfer failed');
+                    showToast(data.message);
+                    setShowTransferModal(false);
+                    setTransferData({ recipient: '', amount: '', note: '' });
+                    loadDashboardData();
+                } catch (err) {
+                    alert(err.message);
+                }
+            };
+
+            // Handle Top Up Submit
+            const handleTopUp = async (e) => {
+                e.preventDefault();
+                try {
+                    const res = await fetch(`${API_BASE}/api/wallet/topup`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`
+                        },
+                        body: JSON.stringify({
+                            amount: parseFloat(topUpData.amount),
+                            payment_method: topUpData.method
+                        })
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || 'Top up failed');
+                    showToast(data.message);
+                    setShowTopUpModal(false);
+                    loadDashboardData();
+                } catch (err) {
+                    alert(err.message);
+                }
+            };
+
+            // Handle Add Expense
+            const handleAddExpense = async (e) => {
+                e.preventDefault();
+                try {
+                    const res = await fetch(`${API_BASE}/api/transactions/expense`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`
+                        },
+                        body: JSON.stringify({
+                            title: expenseData.title,
+                            amount: parseFloat(expenseData.amount),
+                            category: expenseData.category
+                        })
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || 'Failed to record expense');
+                    showToast(data.message);
+                    setShowExpenseModal(false);
+                    setExpenseData({ title: '', amount: '', category: 'Food' });
+                    loadDashboardData();
+                } catch (err) {
+                    alert(err.message);
+                }
+            };
+
+            // Render Auth Screen if not logged in
+            if (!token || !user) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center bg-slate-900 p-4">
+                        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-8">
+                            <div className="flex items-center space-x-3 mb-6">
+                                <div className="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center text-white font-bold text-xl shadow-lg shadow-indigo-200">
+                                    P
+                                </div>
+                                <div>
+                                    <h1 className="text-xl font-bold text-slate-900">PayFlow</h1>
+                                    <p className="text-xs text-slate-500">Payment & Expense Management</p>
+                                </div>
+                            </div>
+
+                            <div className="flex rounded-lg bg-slate-100 p-1 mb-6">
+                                <button
+                                    onClick={() => setAuthView('login')}
+                                    className={`flex-1 py-2 text-sm font-semibold rounded-md transition ${authView === 'login' ? 'bg-white shadow text-indigo-600' : 'text-slate-500'}`}
+                                >
+                                    Sign In
+                                </button>
+                                <button
+                                    onClick={() => setAuthView('register')}
+                                    className={`flex-1 py-2 text-sm font-semibold rounded-md transition ${authView === 'register' ? 'bg-white shadow text-indigo-600' : 'text-slate-500'}`}
+                                >
+                                    Create Account
+                                </button>
+                            </div>
+
+                            {authError && (
+                                <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded-lg text-sm">
+                                    {authError}
+                                </div>
+                            )}
+
+                            {authView === 'login' ? (
+                                <form onSubmit={handleLoginSubmit} className="space-y-4">
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Email Address</label>
+                                        <input
+                                            type="email"
+                                            required
+                                            value={authForm.email}
+                                            onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                                            placeholder="athena@example.com"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Password</label>
+                                        <input
+                                            type="password"
+                                            required
+                                            value={authForm.password}
+                                            onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                                            placeholder="••••••••"
+                                        />
+                                    </div>
+                                    <div className="p-3 bg-indigo-50 rounded-lg text-xs text-indigo-700">
+                                        💡 <strong>Demo Credentials:</strong><br />
+                                        Email: <code className="font-mono font-bold">athena@example.com</code><br />
+                                        Password: <code className="font-mono font-bold">password123</code>
+                                    </div>
+                                    <button
+                                        type="submit"
+                                        className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow-md shadow-indigo-200 transition"
+                                    >
+                                        Sign In to PayFlow
+                                    </button>
+                                </form>
+                            ) : (
+                                <form onSubmit={handleRegisterSubmit} className="space-y-4">
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Full Name</label>
+                                        <input
+                                            type="text"
+                                            required
+                                            value={authForm.name}
+                                            onChange={(e) => setAuthForm({ ...authForm, name: e.target.value })}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                                            placeholder="Athena Lee"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Email Address</label>
+                                        <input
+                                            type="email"
+                                            required
+                                            value={authForm.email}
+                                            onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                                            placeholder="athena@example.com"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-600 uppercase mb-1">Password</label>
+                                        <input
+                                            type="password"
+                                            required
+                                            value={authForm.password}
+                                            onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+                                            placeholder="Minimum 6 characters"
+                                        />
+                                    </div>
+                                    <button
+                                        type="submit"
+                                        className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow-md shadow-indigo-200 transition"
+                                    >
+                                        Register & Claim $500 Bonus
+                                    </button>
+                                </form>
+                            )}
+                        </div>
+                    </div>
+                );
+            }
+
+            const filteredTxns = transactions.filter(t => {
+                const matchCategory = filterCategory === 'all' || t.category.toLowerCase() === filterCategory.toLowerCase();
+                const matchSearch = (t.description || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+                                    (t.reference_id || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+                                    (t.category || '').toLowerCase().includes(searchQuery.toLowerCase());
+                return matchCategory && matchSearch;
+            });
+
+            return (
+                <div className="min-h-screen flex bg-slate-50">
+                    {/* Toast Notification */}
+                    {toast && (
+                        <div className="fixed top-5 right-5 z-50 flex items-center bg-slate-900 text-white px-4 py-3 rounded-xl shadow-xl space-x-2 border border-slate-800 transition transform animate-fade-in">
+                            <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+                            <span className="text-sm font-medium">{toast.message}</span>
+                        </div>
+                    )}
+
+                    {/* Sidebar Navigation */}
+                    <aside className="w-64 bg-white border-r border-slate-200 hidden md:flex flex-col justify-between py-6 px-4">
+                        <div>
+                            {/* Logo */}
+                            <div className="flex items-center space-x-3 px-3 mb-8">
+                                <div className="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center text-white font-bold text-lg shadow-md shadow-indigo-200">
+                                    P
+                                </div>
+                                <div>
+                                    <span className="text-lg font-bold text-slate-900 tracking-tight">PayFlow</span>
+                                    <span className="block text-[10px] uppercase tracking-wider text-slate-400 font-bold">Fintech Core</span>
+                                </div>
+                            </div>
+
+                            {/* Nav Links */}
+                            <nav className="space-y-1">
+                                {[
+                                    { id: 'dashboard', label: 'Dashboard', icon: '📊' },
+                                    { id: 'transactions', label: 'Transactions', icon: '💳' },
+                                    { id: 'analytics', label: 'Analytics', icon: '📈' },
+                                    { id: 'cards', label: 'My Cards', icon: '🏷️' },
+                                    { id: 'planning', label: 'Planning', icon: '📅' },
+                                ].map((tab) => (
+                                    <button
+                                        key={tab.id}
+                                        onClick={() => setActiveTab(tab.id)}
+                                        className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl text-sm font-semibold transition ${
+                                            activeTab === tab.id
+                                                ? 'bg-indigo-50 text-indigo-600'
+                                                : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'
+                                        }`}
+                                    >
+                                        <span className="text-base">{tab.icon}</span>
+                                        <span>{tab.label}</span>
+                                    </button>
+                                ))}
+                            </nav>
+
+                            <div className="mt-8 pt-6 border-t border-slate-100">
+                                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider px-3 mb-2 block">Quick Services</span>
+                                <div className="space-y-1">
+                                    <button
+                                        onClick={() => setShowTransferModal(true)}
+                                        className="w-full flex items-center space-x-3 px-3 py-2 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-100"
+                                    >
+                                        <span>⚡</span>
+                                        <span>P2P Transfer</span>
+                                    </button>
+                                    <button
+                                        onClick={() => setShowTopUpModal(true)}
+                                        className="w-full flex items-center space-x-3 px-3 py-2 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-100"
+                                    >
+                                        <span>📥</span>
+                                        <span>Add Money</span>
+                                    </button>
+                                    <a
+                                        href={`${API_BASE}/api/export/transactions`}
+                                        target="_blank"
+                                        className="w-full flex items-center space-x-3 px-3 py-2 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-100"
+                                    >
+                                        <span>📥</span>
+                                        <span>Export Statements</span>
+                                    </a>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* User Profile & Logout in Sidebar */}
+                        <div className="pt-4 border-t border-slate-200">
+                            <div className="flex items-center justify-between px-2">
+                                <div className="flex items-center space-x-3">
+                                    <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-indigo-600 to-purple-500 flex items-center justify-center text-white font-bold text-sm shadow">
+                                        {user?.name?.charAt(0) || 'U'}
+                                    </div>
+                                    <div className="text-left">
+                                        <p className="text-xs font-bold text-slate-800">{user?.name}</p>
+                                        <p className="text-[10px] text-slate-400 truncate max-w-[100px]">{user?.email}</p>
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={handleLogout}
+                                    title="Logout"
+                                    className="p-1.5 text-slate-400 hover:text-red-500 transition rounded-lg hover:bg-red-50"
+                                >
+                                    🚪
+                                </button>
+                            </div>
+                        </div>
+                    </aside>
+
+                    {/* Main Content Area */}
+                    <main className="flex-1 overflow-y-auto max-h-screen custom-scrollbar p-4 md:p-8">
+                        {/* Top Navbar */}
+                        <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+                            <div>
+                                <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight">
+                                    Good Afternoon, {user?.name}! 👋
+                                </h1>
+                                <p className="text-xs text-slate-500 mt-0.5">
+                                    Track your cashflow and stay in control of your budget.
+                                </p>
+                            </div>
+
+                            <div className="flex items-center space-x-3">
+                                <div className="relative">
+                                    <input
+                                        type="text"
+                                        placeholder="Search transactions..."
+                                        value={searchQuery}
+                                        onChange={(e) => setSearchQuery(e.target.value)}
+                                        className="pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500 w-48 md:w-64 shadow-sm"
+                                    />
+                                    <span className="absolute left-3 top-2.5 text-slate-400 text-xs">🔍</span>
+                                </div>
+
+                                <a
+                                    href={`${API_BASE}/api/export/transactions`}
+                                    className="px-3.5 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-700 hover:bg-slate-50 shadow-sm flex items-center space-x-1.5 transition"
+                                >
+                                    <span>📥</span>
+                                    <span>Export</span>
+                                </a>
+
+                                <button
+                                    onClick={() => setShowExpenseModal(true)}
+                                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-md shadow-indigo-200 flex items-center space-x-1.5 transition"
+                                >
+                                    <span>+ Add Expense</span>
+                                </button>
+                            </div>
+                        </header>
+
+                        {/* Top 4 Stat Cards (Matching Screenshot) */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+                            <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
+                                <div className="flex items-center justify-between text-slate-400 mb-2">
+                                    <span className="text-xs font-semibold">Total Balance</span>
+                                    <span className="text-[11px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full">+5.2%</span>
+                                </div>
+                                <h3 className="text-2xl font-black text-slate-900 tracking-tight">
+                                    ${(summary?.total_balance ?? 3420.55).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </h3>
+                                <p className="text-[11px] text-slate-400 mt-1">Available in active wallet</p>
+                            </div>
+
+                            <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
+                                <div className="flex items-center justify-between text-slate-400 mb-2">
+                                    <span className="text-xs font-semibold">Monthly Income</span>
+                                    <span className="text-[11px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full">+12.0%</span>
+                                </div>
+                                <h3 className="text-2xl font-black text-slate-900 tracking-tight">
+                                    ${(summary?.monthly_income ?? 820.00).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </h3>
+                                <p className="text-[11px] text-slate-400 mt-1">Salary & Incoming transfers</p>
+                            </div>
+
+                            <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
+                                <div className="flex items-center justify-between text-slate-400 mb-2">
+                                    <span className="text-xs font-semibold">Monthly Expense</span>
+                                    <span className="text-[11px] font-bold text-rose-500 bg-rose-50 px-2 py-0.5 rounded-full">-2.0%</span>
+                                </div>
+                                <h3 className="text-2xl font-black text-slate-900 tracking-tight">
+                                    ${(summary?.monthly_expense ?? 470.30).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </h3>
+                                <p className="text-[11px] text-slate-400 mt-1">Total spendings this month</p>
+                            </div>
+
+                            <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
+                                <div className="flex items-center justify-between text-slate-400 mb-2">
+                                    <span className="text-xs font-semibold">Savings</span>
+                                    <span className="text-[11px] font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">+5.0%</span>
+                                </div>
+                                <h3 className="text-2xl font-black text-slate-900 tracking-tight">
+                                    ${(summary?.savings ?? 320.00).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </h3>
+                                <p className="text-[11px] text-slate-400 mt-1">Net accumulated savings</p>
+                            </div>
+                        </div>
+
+                        {/* Mid Section: Chart + My Card & Subscriptions */}
+                        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+                            {/* Balance Cashflow Chart (2 Cols) */}
+                            <div className="lg:col-span-2 bg-white p-6 rounded-2xl border border-slate-100 shadow-sm flex flex-col justify-between">
+                                <div className="flex items-center justify-between mb-4">
+                                    <div>
+                                        <h4 className="text-sm font-bold text-slate-900">Balance Cashflow</h4>
+                                        <div className="flex items-baseline space-x-2 mt-1">
+                                            <span className="text-2xl font-extrabold text-slate-900">$4,310.20</span>
+                                            <span className="text-xs text-slate-400">Total Balance across all accounts</span>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center space-x-4 text-xs font-semibold">
+                                        <span className="flex items-center space-x-1.5 text-indigo-600">
+                                            <span className="w-2.5 h-2.5 rounded-full bg-indigo-600"></span>
+                                            <span>Income: $1,400.00</span>
+                                        </span>
+                                        <span className="flex items-center space-x-1.5 text-rose-500">
+                                            <span className="w-2.5 h-2.5 rounded-full bg-rose-500"></span>
+                                            <span>Expenses: $780.50</span>
+                                        </span>
+                                    </div>
+                                </div>
+
+                                <div className="h-64 w-full">
+                                    <canvas ref={chartRef}></canvas>
+                                </div>
+                            </div>
+
+                            {/* Right Column: Virtual Card & Subscriptions */}
+                            <div className="space-y-6">
+                                {/* Virtual Debit Card (Exact Match) */}
+                                <div className="card-gradient rounded-2xl p-5 text-white shadow-xl shadow-indigo-100 relative overflow-hidden">
+                                    <div className="flex justify-between items-start mb-6">
+                                        <span className="text-[10px] uppercase font-bold tracking-widest text-indigo-200">Virtual Platinum</span>
+                                        <span className="text-xs font-bold text-white bg-white/20 backdrop-blur px-2 py-0.5 rounded">Primary Bank</span>
+                                    </div>
+
+                                    {/* Chip & Contactless */}
+                                    <div className="flex items-center space-x-3 mb-6">
+                                        <div className="w-8 h-6 bg-amber-300 rounded flex items-center justify-center text-[10px] font-mono text-amber-900 font-bold">
+                                            [::]
+                                        </div>
+                                        <span className="text-sm opacity-70">📶</span>
+                                    </div>
+
+                                    <div className="text-lg font-mono tracking-widest font-semibold mb-4">
+                                        {summary?.card?.number || '2216 1245 9814 3892'}
+                                    </div>
+
+                                    <div className="flex justify-between items-end text-xs">
+                                        <div>
+                                            <span className="text-[9px] uppercase tracking-wider text-indigo-200 block">Cardholder</span>
+                                            <span className="font-bold tracking-wide">{user?.name?.toUpperCase()}</span>
+                                        </div>
+                                        <div>
+                                            <span className="text-[9px] uppercase tracking-wider text-indigo-200 block">Expires</span>
+                                            <span className="font-bold font-mono">{summary?.card?.expiry || '09/29'}</span>
+                                        </div>
+                                    </div>
+
+                                    {/* Spending Limit Progress */}
+                                    <div className="mt-4 pt-3 border-t border-white/10">
+                                        <div className="flex justify-between text-[11px] mb-1">
+                                            <span className="text-indigo-200">Limit Used</span>
+                                            <span className="font-bold">${(summary?.card?.limit_used ?? 310.50).toFixed(2)} / $1,000.00</span>
+                                        </div>
+                                        <div className="w-full bg-white/20 rounded-full h-1.5 overflow-hidden">
+                                            <div className="bg-emerald-400 h-full rounded-full" style={{ width: '31%' }}></div>
+                                        </div>
+                                    </div>
+
+                                    {/* Quick Actions inside Card */}
+                                    <div className="grid grid-cols-2 gap-2 mt-4">
+                                        <button
+                                            onClick={() => setShowTopUpModal(true)}
+                                            className="py-1.5 bg-white text-indigo-700 text-xs font-bold rounded-lg hover:bg-indigo-50 transition shadow"
+                                        >
+                                            + Top Up
+                                        </button>
+                                        <button
+                                            onClick={() => setShowTransferModal(true)}
+                                            className="py-1.5 bg-indigo-900/40 text-white text-xs font-bold rounded-lg hover:bg-indigo-900/60 transition backdrop-blur"
+                                        >
+                                            Transfer ➔
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* Next Payments / Subscriptions */}
+                                <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
+                                    <div className="flex items-center justify-between mb-4">
+                                        <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Next Payments</h4>
+                                        <span className="text-[11px] text-indigo-600 font-semibold cursor-pointer">View All</span>
+                                    </div>
+
+                                    <div className="space-y-3">
+                                        {subscriptions.slice(0, 4).map((sub, idx) => (
+                                            <div key={idx} className="flex items-center justify-between text-xs py-1">
+                                                <div className="flex items-center space-x-3">
+                                                    <div className="w-8 h-8 rounded-lg bg-slate-100 flex items-center justify-center font-bold text-indigo-600">
+                                                        {sub.service_name.charAt(0)}
+                                                    </div>
+                                                    <div>
+                                                        <p className="font-bold text-slate-800">{sub.service_name}</p>
+                                                        <p className="text-[10px] text-slate-400">{sub.category} • Due {sub.next_payment_date}</p>
+                                                    </div>
+                                                </div>
+                                                <span className="font-bold text-slate-900">${parseFloat(sub.amount).toFixed(2)}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Bottom Section: Transactions History Table */}
+                        <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6">
+                            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+                                <div>
+                                    <h4 className="text-base font-bold text-slate-900">Transaction History</h4>
+                                    <p className="text-xs text-slate-400">All incoming and outgoing transactions</p>
+                                </div>
+
+                                {/* Category Filters */}
+                                <div className="flex items-center space-x-2 overflow-x-auto pb-1">
+                                    {['all', 'Income', 'Housing', 'Shopping', 'Food', 'Utilities'].map((cat) => (
+                                        <button
+                                            key={cat}
+                                            onClick={() => setFilterCategory(cat)}
+                                            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition capitalize ${
+                                                filterCategory.toLowerCase() === cat.toLowerCase()
+                                                    ? 'bg-indigo-600 text-white shadow-sm'
+                                                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                            }`}
+                                        >
+                                            {cat}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* Table */}
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-left text-xs">
+                                    <thead>
+                                        <tr className="border-b border-slate-100 text-slate-400 uppercase tracking-wider text-[10px]">
+                                            <th className="pb-3 font-semibold">Transaction Details</th>
+                                            <th className="pb-3 font-semibold">Reference ID</th>
+                                            <th className="pb-3 font-semibold">Category</th>
+                                            <th className="pb-3 font-semibold">Date & Time</th>
+                                            <th className="pb-3 font-semibold">Status</th>
+                                            <th className="pb-3 font-semibold text-right">Amount</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                        {filteredTxns.length === 0 ? (
+                                            <tr>
+                                                <td colSpan="6" className="py-8 text-center text-slate-400">
+                                                    No transactions found for the selected filter.
+                                                </td>
+                                            </tr>
+                                        ) : (
+                                            filteredTxns.map((t, idx) => {
+                                                const isCredit = t.type === 'TOPUP' || t.type === 'TRANSFER_IN';
+                                                return (
+                                                    <tr key={idx} className="hover:bg-slate-50/80 transition">
+                                                        <td className="py-3.5 flex items-center space-x-3">
+                                                            <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs ${
+                                                                isCredit ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-700'
+                                                            }`}>
+                                                                {isCredit ? '↓' : '↑'}
+                                                            </div>
+                                                            <div>
+                                                                <p className="font-bold text-slate-800">{t.description || t.category}</p>
+                                                                <p className="text-[10px] text-slate-400">{t.recipient_name ? `Party: ${t.recipient_name}` : t.type}</p>
+                                                            </div>
+                                                        </td>
+                                                        <td className="py-3.5 font-mono text-slate-500 font-medium">
+                                                            {t.reference_id}
+                                                        </td>
+                                                        <td className="py-3.5">
+                                                            <span className="px-2.5 py-1 bg-slate-100 text-slate-700 rounded-md font-semibold text-[10px]">
+                                                                {t.category}
+                                                            </span>
+                                                        </td>
+                                                        <td className="py-3.5 text-slate-500">
+                                                            {t.created_at}
+                                                        </td>
+                                                        <td className="py-3.5">
+                                                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-600">
+                                                                {t.status}
+                                                            </span>
+                                                        </td>
+                                                        <td className={`py-3.5 font-extrabold text-right text-sm ${
+                                                            isCredit ? 'text-emerald-600' : 'text-slate-900'
+                                                        }`}>
+                                                            {isCredit ? `+$${parseFloat(t.amount).toFixed(2)}` : `-$${parseFloat(t.amount).toFixed(2)}`}
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </main>
+
+                    {/* MODAL: P2P Money Transfer */}
+                    {showTransferModal && (
+                        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                            <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 animate-scale-in">
+                                <div className="flex justify-between items-center mb-4">
+                                    <h3 className="text-base font-extrabold text-slate-900">Transfer Money</h3>
+                                    <button onClick={() => setShowTransferModal(false)} className="text-slate-400 hover:text-slate-600">✕</button>
+                                </div>
+                                <form onSubmit={handleTransfer} className="space-y-4">
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-600 mb-1">Recipient</label>
+                                        <input
+                                            type="text"
+                                            required
+                                            list="recipients-list"
+                                            placeholder="Enter recipient email or account #"
+                                            value={transferData.recipient}
+                                            onChange={(e) => setTransferData({ ...transferData, recipient: e.target.value })}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-indigo-500"
+                                        />
+                                        <datalist id="recipients-list">
+                                            {recipients.map(r => (
+                                                <option key={r.id} value={r.email}>{r.name} ({r.account_number})</option>
+                                            ))}
+                                        </datalist>
+                                        <p className="text-[10px] text-slate-400 mt-1">Available demo users: <span className="font-semibold">alex@example.com</span>, <span className="font-semibold">sarah@example.com</span></p>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-600 mb-1">Amount ($ USD)</label>
+                                        <input
+                                            type="number"
+                                            step="0.01"
+                                            min="0.01"
+                                            required
+                                            placeholder="0.00"
+                                            value={transferData.amount}
+                                            onChange={(e) => setTransferData({ ...transferData, amount: e.target.value })}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-indigo-500 font-bold"
+                                        />
+                                        <p className="text-[10px] text-slate-400 mt-1">
+                                            Available balance: <span className="font-bold text-indigo-600">${(summary?.total_balance ?? 0).toFixed(2)}</span>
+                                        </p>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-600 mb-1">Note (Optional)</label>
+                                        <input
+                                            type="text"
+                                            placeholder="Dinner, rent, freelance..."
+                                            value={transferData.note}
+                                            onChange={(e) => setTransferData({ ...transferData, note: e.target.value })}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-indigo-500"
+                                        />
+                                    </div>
+                                    <div className="flex space-x-2 pt-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowTransferModal(false)}
+                                            className="flex-1 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg"
+                                        >
+                                            Cancel
+                                        </button>
+                                        <button
+                                            type="submit"
+                                            className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg shadow-md shadow-indigo-200"
+                                        >
+                                            Send Money
+                                        </button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* MODAL: Top Up Wallet */}
+                    {showTopUpModal && (
+                        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                            <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 animate-scale-in">
+                                <div className="flex justify-between items-center mb-4">
+                                    <h3 className="text-base font-extrabold text-slate-900">Add Money to Wallet</h3>
+                                    <button onClick={() => setShowTopUpModal(false)} className="text-slate-400 hover:text-slate-600">✕</button>
+                                </div>
+                                <form onSubmit={handleTopUp} className="space-y-4">
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-600 mb-2">Select Amount</label>
+                                        <div className="grid grid-cols-4 gap-2 mb-2">
+                                            {['20', '50', '100', '250'].map((amt) => (
+                                                <button
+                                                    key={amt}
+                                                    type="button"
+                                                    onClick={() => setTopUpData({ ...topUpData, amount: amt })}
+                                                    className={`py-2 rounded-lg text-xs font-bold border transition ${
+                                                        topUpData.amount === amt
+                                                            ? 'border-indigo-600 bg-indigo-50 text-indigo-700'
+                                                            : 'border-slate-200 text-slate-700 hover:bg-slate-50'
+                                                    }`}
+                                                >
+                                                    ${amt}
+                                                </button>
+                                            ))}
+                                        </div>
+                                        <input
+                                            type="number"
+                                            step="0.01"
+                                            min="1"
+                                            required
+                                            value={topUpData.amount}
+                                            onChange={(e) => setTopUpData({ ...topUpData, amount: e.target.value })}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-indigo-500 font-bold"
+                                            placeholder="Custom Amount"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-600 mb-1">Simulated Payment Method</label>
+                                        <select
+                                            value={topUpData.method}
+                                            onChange={(e) => setTopUpData({ ...topUpData, method: e.target.value })}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-indigo-500"
+                                        >
+                                            <option value="Credit Card">Credit Card (Visa / Mastercard)</option>
+                                            <option value="Bank Account">Linked Bank Account</option>
+                                            <option value="PayPal">PayPal Balance</option>
+                                        </select>
+                                    </div>
+                                    <div className="flex space-x-2 pt-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowTopUpModal(false)}
+                                            className="flex-1 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg"
+                                        >
+                                            Cancel
+                                        </button>
+                                        <button
+                                            type="submit"
+                                            className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg shadow-md shadow-emerald-200"
+                                        >
+                                            Deposit Instant
+                                        </button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* MODAL: Add Expense */}
+                    {showExpenseModal && (
+                        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                            <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 animate-scale-in">
+                                <div className="flex justify-between items-center mb-4">
+                                    <h3 className="text-base font-extrabold text-slate-900">Record New Expense</h3>
+                                    <button onClick={() => setShowExpenseModal(false)} className="text-slate-400 hover:text-slate-600">✕</button>
+                                </div>
+                                <form onSubmit={handleAddExpense} className="space-y-4">
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-600 mb-1">Expense Title / Merchant</label>
+                                        <input
+                                            type="text"
+                                            required
+                                            placeholder="e.g. Grocery Store, Coffee, Uber"
+                                            value={expenseData.title}
+                                            onChange={(e) => setExpenseData({ ...expenseData, title: e.target.value })}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-indigo-500"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-600 mb-1">Amount ($ USD)</label>
+                                        <input
+                                            type="number"
+                                            step="0.01"
+                                            min="0.01"
+                                            required
+                                            placeholder="0.00"
+                                            value={expenseData.amount}
+                                            onChange={(e) => setExpenseData({ ...expenseData, amount: e.target.value })}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-indigo-500 font-bold"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-600 mb-1">Category</label>
+                                        <select
+                                            value={expenseData.category}
+                                            onChange={(e) => setExpenseData({ ...expenseData, category: e.target.value })}
+                                            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-indigo-500"
+                                        >
+                                            <option value="Food">Food & Dining</option>
+                                            <option value="Housing">Housing & Rent</option>
+                                            <option value="Utilities">Utilities & Bills</option>
+                                            <option value="Shopping">Shopping & Retail</option>
+                                            <option value="Entertainment">Entertainment</option>
+                                            <option value="Transport">Transport & Fuel</option>
+                                            <option value="Health">Health & Fitness</option>
+                                            <option value="General">Other</option>
+                                        </select>
+                                    </div>
+                                    <div className="flex space-x-2 pt-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowExpenseModal(false)}
+                                            className="flex-1 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg"
+                                        >
+                                            Cancel
+                                        </button>
+                                        <button
+                                            type="submit"
+                                            className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg shadow-md shadow-indigo-200"
+                                        >
+                                            Save Expense
+                                        </button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
